@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/justinsb/gova/joiner"
 	"github.com/justinsb/gova/log"
 	"github.com/justinsb/gova/match"
 	"github.com/justinsb/gova/splitter"
@@ -62,7 +63,7 @@ func (self *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 			key := tokens[1]
 			if key == "user-data" && len(tokens) == 2 {
-				self.serveFile(w, r, clientIp, "user-data")
+				self.serveFile(w, r, clientIp, "ec2/user-data")
 				return
 			}
 
@@ -70,7 +71,7 @@ func (self *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// Public keys are specially stored
 				// (it looks like the original intention was to support multiple key formats)
 				if len(tokens) >= 3 && tokens[2] == "public-keys" {
-					publicKeys, err := self.listFiles(clientIp, "meta-data/public-keys")
+					publicKeys, err := self.listFiles(clientIp, "ec2/meta-data/public-keys")
 					if err != nil {
 						// XXX: Validate was not-found?
 						log.Warn("Error reading public keys", err)
@@ -99,7 +100,7 @@ func (self *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 							return
 						}
 						if len(tokens) == 5 && tokens[4] == "openssh-key" {
-							self.serveFile(w, r, clientIp, "meta-data/public-keys/"+publicKeys[i])
+							self.serveFile(w, r, clientIp, "ec2/meta-data/public-keys/"+publicKeys[i])
 							return
 						}
 					}
@@ -107,7 +108,8 @@ func (self *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 
-				self.serveFile(w, r, clientIp, "meta-data")
+				path := "ec2/" + joiner.On("/").Join(tokens[1:])
+				self.serveFile(w, r, clientIp, path)
 				return
 			}
 		}
@@ -139,7 +141,20 @@ func (self *httpHandler) serveFile(w http.ResponseWriter, r *http.Request, clien
 	}
 
 	if d.IsDir() {
-		self.dirList(w, f)
+		for {
+			dirs, err := f.Readdir(100)
+			if err != nil || len(dirs) == 0 {
+				break
+			}
+			for _, d := range dirs {
+				name := d.Name()
+				if d.IsDir() {
+					name += "/"
+				}
+				url := url.URL{Path: name}
+				fmt.Fprintf(w, "%s\n", url.String())
+			}
+		}
 		return
 	}
 
@@ -176,23 +191,6 @@ func (self *httpHandler) listFiles(clientIp string, path string) ([]string, erro
 	sort.Strings(keys)
 
 	return keys, nil
-}
-
-func (self *httpHandler) dirList(w http.ResponseWriter, f http.File) {
-	for {
-		dirs, err := f.Readdir(100)
-		if err != nil || len(dirs) == 0 {
-			break
-		}
-		for _, d := range dirs {
-			name := d.Name()
-			if d.IsDir() {
-				name += "/"
-			}
-			url := url.URL{Path: name}
-			fmt.Fprintf(w, "%s\n", url.String())
-		}
-	}
 }
 
 func main() {
