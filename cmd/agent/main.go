@@ -18,9 +18,9 @@ import (
 	"github.com/justinsb/gova/splitter"
 )
 
-var (
-	validChars = match.AnyOf("abcdefghijklmnopqrstuvwxyz0123456789-_:")
-)
+var validChars = match.AnyOf("abcdefghijklmnopqrstuvwxyz0123456789-_:")
+
+var ec2Versions = []string{"1.0", "2007-01-19", "2007-03-01", "2007-08-29", "2007-10-10", "2007-12-15", "2008-02-01", "2008-09-01", "2009-04-04", "2011-01-01", "2011-05-01", "2012-01-12", "2014-02-25", "latest"}
 
 var flagListenAddr = flag.String("listen", "169.254.169.254:80", "address for http server")
 var flagBasedir = flag.String("basedir", "http", "base directory for http content to serve")
@@ -51,6 +51,13 @@ func (self *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	colonIndex := strings.Index(clientIp, ":")
 	if colonIndex != -1 {
 		clientIp = clientIp[:colonIndex]
+	}
+
+	if len(tokens) == 0 {
+		for _, version := range ec2Versions {
+			fmt.Fprintf(w, "%s\n", version)
+		}
+		return
 	}
 
 	if len(tokens) >= 2 {
