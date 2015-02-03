@@ -70,7 +70,7 @@ func (self *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	osFile := f.(*os.File)
-	log.Println("Will server file", osFile.Name())
+	log.Println("Will serve file", osFile.Name())
 
 	http.ServeFile(w, r, osFile.Name())
 }
