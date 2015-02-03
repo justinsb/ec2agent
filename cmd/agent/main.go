@@ -2,37 +2,48 @@ package main
 
 import (
 	"flag"
-	"log"
-	"os"
-	"time"
-	"net/http"
-	"strings"
-	"path"
-	"net/url"
 	"fmt"
-	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"path"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/justinsb/gova/log"
+	"github.com/justinsb/gova/match"
+	"github.com/justinsb/gova/splitter"
+)
+
+var (
+	validChars = match.AnyOf("abcdefghijklmnopqrstuvwxyz0123456789-_:")
 )
 
 var flagListenAddr = flag.String("listen", "169.254.169.254:80", "address for http server")
 var flagBasedir = flag.String("basedir", "http", "base directory for http content to serve")
 
 type httpHandler struct {
-	baseFs http.FileSystem
+	baseFs   http.FileSystem
 	basePath string
 }
 
 func (self *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	urlPath := r.URL.Path
 	if !strings.HasPrefix(urlPath, "/") {
-		urlPath = "/"+urlPath
+		urlPath = "/" + urlPath
 		r.URL.Path = urlPath
 	}
-	log.Println(r.Method, urlPath)
+	log.Debug("%v %v", r.Method, urlPath)
 	urlPath = path.Clean(urlPath)
 
-	if strings.Contains(urlPath, "..") {
-		http.NotFound(w, r)
-		return
+	tokens := splitter.On("/").OmitEmptyStrings().Split(urlPath)
+	for _, token := range tokens {
+		if !validChars.MatchesAllOf(token) {
+			http.NotFound(w, r)
+			return
+		}
 	}
 
 	clientIp := r.RemoteAddr
@@ -40,13 +51,80 @@ func (self *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if colonIndex != -1 {
 		clientIp = clientIp[:colonIndex]
 	}
-	name := clientIp + "/" + urlPath
-	log.Println("Mapping to filepath", name)
 
+	if len(tokens) >= 2 {
+		version := tokens[0]
+		if version == "openstack" {
+			// Not handled
+		} else {
+			// Assume EC2
+			// XXX: Properly check the version?
+
+			key := tokens[1]
+			if key == "user-data" && len(tokens) == 2 {
+				self.serveFile(w, r, clientIp, "user-data")
+				return
+			}
+
+			if key == "meta-data" {
+				// Public keys are specially stored
+				// (it looks like the original intention was to support multiple key formats)
+				if len(tokens) >= 3 && tokens[2] == "public-keys" {
+					publicKeys, err := self.listFiles(clientIp, "meta-data/public-keys")
+					if err != nil {
+						// XXX: Validate was not-found?
+						log.Warn("Error reading public keys", err)
+						http.NotFound(w, r)
+						return
+					}
+					if len(tokens) == 3 {
+						for i, name := range publicKeys {
+							fmt.Fprintf(w, "%v=%s\n", i, name)
+						}
+						return
+					}
+					if len(tokens) >= 4 {
+						i, err := strconv.Atoi(tokens[3])
+						if err != nil {
+							http.NotFound(w, r)
+							return
+						}
+						if i < 0 || i >= len(publicKeys) {
+							http.NotFound(w, r)
+							return
+						}
+						if len(tokens) == 4 {
+							// List formats for public-key
+							fmt.Fprintf(w, "openssh-key\n")
+							return
+						}
+						if len(tokens) == 5 && tokens[4] == "openssh-key" {
+							self.serveFile(w, r, clientIp, "meta-data/public-keys/"+publicKeys[i])
+							return
+						}
+					}
+					http.NotFound(w, r)
+					return
+				}
+
+				self.serveFile(w, r, clientIp, "meta-data")
+				return
+			}
+		}
+	}
+
+	log.Debug("No mapping for %v", urlPath)
+	http.NotFound(w, r)
+	return
+}
+
+func (self *httpHandler) serveFile(w http.ResponseWriter, r *http.Request, clientIp string, path string) {
+	name := clientIp + "/" + path
 
 	f, err := self.baseFs.Open(name)
 	if err != nil {
-		// TODO expose actual error?
+		// XXX: Validate that was not-found?
+		log.Warn("Error opening file %v", name)
 		http.NotFound(w, r)
 		return
 	}
@@ -54,25 +132,50 @@ func (self *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	d, err1 := f.Stat()
 	if err1 != nil {
-		// TODO expose actual error?
+		// XXX: expose actual error?
+		log.Warn("Error stat-ing file %v", name)
 		http.NotFound(w, r)
 		return
 	}
 
 	if d.IsDir() {
-		if strings.HasSuffix(name, "/public-keys") {
-			log.Println("Faking ouptut for public-keys")
-			io.WriteString(w, "0=fathomdb")
-			return
-		}
 		self.dirList(w, f)
 		return
 	}
 
 	osFile := f.(*os.File)
-	log.Println("Will serve file", osFile.Name())
+	log.Debug("Will serve file", osFile.Name())
 
 	http.ServeFile(w, r, osFile.Name())
+}
+
+func (self *httpHandler) listFiles(clientIp string, path string) ([]string, error) {
+	name := clientIp + "/" + path
+
+	f, err := self.baseFs.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	keys := []string{}
+
+	dirs, err := f.Readdir(-1)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range dirs {
+		name := d.Name()
+		if d.IsDir() {
+			name += "/"
+		}
+		keys = append(keys, name)
+	}
+
+	// Should be sorted, but double-check
+	sort.Strings(keys)
+
+	return keys, nil
 }
 
 func (self *httpHandler) dirList(w http.ResponseWriter, f http.File) {
@@ -99,11 +202,12 @@ func main() {
 	httpHandler.baseFs = http.Dir(*flagBasedir)
 
 	s := &http.Server{
-		Addr:          *flagListenAddr,
+		Addr:           *flagListenAddr,
 		Handler:        httpHandler,
 		ReadTimeout:    10 * time.Second,
 		WriteTimeout:   10 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
-	log.Fatal(s.ListenAndServe())
+	log.Error("%v", s.ListenAndServe())
+	os.Exit(1)
 }
